@@ -1,0 +1,9 @@
+customtkinter
+fpdf2
+
+# API server
+Flask
+flask-cors
+requests
+waitress
+gunicorn
