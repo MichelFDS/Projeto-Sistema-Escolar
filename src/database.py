@@ -39,6 +39,24 @@ def inicializar_banco():
     )
     ''')
 
+    # Criar tabela de turmas (cada turma tem nome único)
+    cur.execute('''
+    CREATE TABLE IF NOT EXISTS turmas (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        nome TEXT NOT NULL UNIQUE
+    )
+    ''')
+
+    # Garantir coluna turma_id na tabela alunos (compatibilidade com DB já existente)
+    # SQLite permite ADD COLUMN; verificamos se a coluna já existe via pragma.
+    cur.execute("PRAGMA table_info(alunos)")
+    cols = [r[1] for r in cur.fetchall()]
+    if 'turma_id' not in cols:
+        try:
+            cur.execute('ALTER TABLE alunos ADD COLUMN turma_id INTEGER')
+        except Exception:
+            pass
+
     cur.execute('''
     CREATE TABLE IF NOT EXISTS usuarios (
         username TEXT PRIMARY KEY,
@@ -85,9 +103,24 @@ def cadastrar_aluno(conn, matricula: int, nome: str, curso: str, data_nasc: str,
     try:
         cur.execute('BEGIN TRANSACTION')
         
-        # Cadastra o aluno
-        cur.execute('INSERT INTO alunos (matricula, nome, curso, data_nascimento) VALUES (?, ?, ?, ?)',
-                    (matricula, nome, curso, data_nasc))
+        # Cadastra o aluno (suporta turma_id se fornecido via kwargs)
+        # Accept optional turma_id passed in via a keyword argument in callers.
+        turma_id = None
+        # permissive: callers may pass turma_id in locals/globals; safer to accept via attribute
+        if 'turma_id' in globals():
+            turma_id = globals().get('turma_id')
+        # But prefer an explicit attribute on the connection object (not ideal) —
+        # the GUI will call the function with the turma_id argument explicitly.
+        # To keep compatibility, try to read from a passed-in attribute on conn (not required).
+        if hasattr(conn, 'turma_id') and conn.turma_id is not None:
+            turma_id = conn.turma_id
+
+        if turma_id is None:
+            cur.execute('INSERT INTO alunos (matricula, nome, curso, data_nascimento) VALUES (?, ?, ?, ?)',
+                        (matricula, nome, curso, data_nasc))
+        else:
+            cur.execute('INSERT INTO alunos (matricula, nome, curso, data_nascimento, turma_id) VALUES (?, ?, ?, ?, ?)',
+                        (matricula, nome, curso, data_nasc, turma_id))
         
         # Se fornecido username e senha, cria conta de usuário
         if username and senha:
@@ -102,20 +135,55 @@ def cadastrar_aluno(conn, matricula: int, nome: str, curso: str, data_nasc: str,
 
 def obter_aluno(conn, matricula: int):
     cur = conn.cursor()
-    cur.execute('SELECT * FROM alunos WHERE matricula = ?', (matricula,))
+    # Retornar também o nome da turma (se houver)
+    cur.execute('''
+    SELECT a.matricula, a.nome, a.curso, a.data_nascimento, a.np1, a.np2, a.turma_id, t.nome as turma
+    FROM alunos a
+    LEFT JOIN turmas t ON a.turma_id = t.id
+    WHERE a.matricula = ?
+    ''', (matricula,))
     row = cur.fetchone()
     return dict(row) if row else None
 
 def listar_alunos(conn):
     cur = conn.cursor()
-    cur.execute('SELECT matricula, nome, curso, data_nascimento, np1, np2 FROM alunos ORDER BY matricula')
+    cur.execute('''
+    SELECT a.matricula, a.nome, a.curso, a.data_nascimento, a.np1, a.np2, a.turma_id, t.nome as turma
+    FROM alunos a
+    LEFT JOIN turmas t ON a.turma_id = t.id
+    ORDER BY a.matricula
+    ''')
     return [dict(r) for r in cur.fetchall()]
 
-def atualizar_aluno(conn, matricula: int, nome: str, curso: str, data_nasc: str):
+def atualizar_aluno(conn, matricula: int, nome: str, curso: str, data_nasc: str, turma_id: int = None):
     cur = conn.cursor()
-    cur.execute('UPDATE alunos SET nome = ?, curso = ?, data_nascimento = ? WHERE matricula = ?',
-                (nome, curso, data_nasc, matricula))
+    if turma_id is None:
+        cur.execute('UPDATE alunos SET nome = ?, curso = ?, data_nascimento = ? WHERE matricula = ?',
+                    (nome, curso, data_nasc, matricula))
+    else:
+        cur.execute('UPDATE alunos SET nome = ?, curso = ?, data_nascimento = ?, turma_id = ? WHERE matricula = ?',
+                    (nome, curso, data_nasc, turma_id, matricula))
     conn.commit()
+
+
+def listar_turmas(conn):
+    cur = conn.cursor()
+    cur.execute('SELECT id, nome FROM turmas ORDER BY nome')
+    return [dict(r) for r in cur.fetchall()]
+
+
+def criar_turma(conn, nome: str):
+    cur = conn.cursor()
+    try:
+        cur.execute('INSERT OR IGNORE INTO turmas (nome) VALUES (?)', (nome,))
+        conn.commit()
+        # retornar id existente ou recém-criado
+        cur.execute('SELECT id FROM turmas WHERE nome = ?', (nome,))
+        r = cur.fetchone()
+        return r['id'] if r else None
+    except Exception:
+        conn.rollback()
+        raise
 
 def excluir_aluno(conn, matricula: int):
     cur = conn.cursor()

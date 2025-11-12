@@ -4,7 +4,7 @@ import tkinter as tk
 import sqlite3
 import os
 import datetime
-from src.database import listar_alunos, obter_aluno, cadastrar_aluno, atualizar_aluno, excluir_aluno, atualizar_notas, autenticar_usuario, associar_matricula_usuario, autenticar_aluno_por_matricula, autenticar_aluno_por_matricula_e_senha
+from src.database import listar_alunos, obter_aluno, cadastrar_aluno, atualizar_aluno, excluir_aluno, atualizar_notas, autenticar_usuario, associar_matricula_usuario, autenticar_aluno_por_matricula, autenticar_aluno_por_matricula_e_senha, listar_turmas, criar_turma
 from src.utils import validar_data, validar_nome, validar_curso, gerar_boletim_pdf
 from src.chat import ChatApp
 
@@ -317,6 +317,7 @@ class SistemaGUI:
             ctk.CTkButton(frame, text="Listar Todos Alunos", width=220, height=50, command=self.tela_listar_alunos).pack(pady=10)
             ctk.CTkButton(frame, text="Gerenciar Notas", width=220, height=50, command=self.tela_menu_notas).pack(pady=10)
             ctk.CTkButton(frame, text="Chat", width=220, height=50, command=self.abrir_chat).pack(pady=10)
+            ctk.CTkButton(frame, text="Gerenciar Turmas", width=220, height=50, command=self.tela_gerenciar_turmas).pack(pady=10)
 
         elif tipo == "professor":
             ctk.CTkButton(frame, text="Consultar Aluno", width=220, height=50, command=self.tela_consultar_aluno).pack(pady=10)
@@ -357,6 +358,14 @@ class SistemaGUI:
         ent_nome.pack(pady=8)
         ent_curso = ctk.CTkEntry(frame, placeholder_text="Curso", width=420)
         ent_curso.pack(pady=8)
+        # Turma (dropdown) - carregar turmas atuais
+        turmas_list = listar_turmas(self.conn)
+        turma_options = ['Nenhuma'] + [t['nome'] for t in turmas_list] + ['Criar nova...']
+        turma_menu = ctk.CTkOptionMenu(frame, values=turma_options)
+        turma_menu.set(turma_options[0])
+        turma_menu.pack(pady=8)
+        ent_nova_turma = ctk.CTkEntry(frame, placeholder_text="Nome da nova turma (se selecionar criar)", width=420)
+        # inicialmente escondido (não empacotado até selecionar criar)
         ent_data = ctk.CTkEntry(frame, placeholder_text="Data de Nascimento (DD/MM/YYYY)", width=420)
         ent_data.pack(pady=8)
 
@@ -377,6 +386,8 @@ class SistemaGUI:
                 matricula = ent_matricula.get().strip()
                 nome = ent_nome.get().strip()
                 curso = ent_curso.get().strip()
+                turma_selec = turma_menu.get() if hasattr(turma_menu, 'get') else None
+                nova_turma_nome = ent_nova_turma.get().strip() if ent_nova_turma.winfo_ismapped() else None
                 data_nasc = ent_data.get().strip()
                 username = ent_username.get().strip()
                 senha = ent_senha.get()
@@ -407,7 +418,25 @@ class SistemaGUI:
                 if senha != confirma_senha:
                     raise ValueError("As senhas não coincidem.")
 
+                # Determinar turma_id a salvar
+                turma_id = None
+                if turma_selec and turma_selec not in ('Nenhuma', None):
+                    if turma_selec == 'Criar nova...':
+                        if not nova_turma_nome:
+                            raise ValueError('Informe o nome da nova turma.')
+                        turma_id = criar_turma(self.conn, nova_turma_nome)
+                    else:
+                        # procurar id pela lista carregada
+                        for t in turmas_list:
+                            if t['nome'] == turma_selec:
+                                turma_id = t['id']
+                                break
+
+                # chamar cadastrar com turma_id explicitamente: usamos kwargs to keep signature compatible
                 cadastrar_aluno(self.conn, matricula_int, nome, curso, data_nasc, username, senha)
+                # se turma_id fornecido, atualizar agora (compatível com versões anteriores)
+                if turma_id is not None:
+                    atualizar_aluno(self.conn, matricula_int, nome, curso, data_nasc, turma_id)
                 messagebox.showinfo("Sucesso", "Aluno cadastrado com sucesso com dados de acesso!")
                 win.destroy()
             except sqlite3.IntegrityError:
@@ -416,6 +445,86 @@ class SistemaGUI:
                 messagebox.showerror("Erro ao cadastrar", str(e))
 
         ctk.CTkButton(frame, text="Salvar", width=180, command=cadastrar_aluno_interno).pack(pady=12)
+
+        # Mostrar/ocultar campo de nova turma quando necessário
+        def on_turma_change(value):
+            try:
+                if value == 'Criar nova...':
+                    ent_nova_turma.pack(pady=8)
+                else:
+                    try:
+                        ent_nova_turma.pack_forget()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        try:
+            turma_menu.configure(command=on_turma_change)
+        except Exception:
+            # CTkOptionMenu may not accept command in some versions; fallback using trace if variable available
+            try:
+                var = turma_menu._variable
+                var.trace_add('write', lambda *a: on_turma_change(var.get()))
+            except Exception:
+                pass
+
+    def tela_gerenciar_turmas(self):
+        win = ctk.CTkToplevel(self.menu_janela)
+        win.title('Gerenciar Turmas')
+        self._center_window(win, 500, 420)
+        win.resizable(False, False)
+        win.transient(self.menu_janela)
+        try:
+            win.grab_set()
+        except Exception:
+            pass
+
+        frame = ctk.CTkFrame(win)
+        frame.pack(fill='both', expand=True, padx=12, pady=12)
+
+        lbl = ctk.CTkLabel(frame, text='Turmas Cadastradas', font=self.fonts.SUBTITLE)
+        lbl.pack(pady=(6, 8))
+
+        list_container = tk.Frame(frame)
+        list_container.pack(fill='both', expand=True)
+        cols = ('id', 'nome')
+        tree = ttk.Treeview(list_container, columns=cols, show='headings', height=8)
+        tree.heading('id', text='ID')
+        tree.heading('nome', text='Nome da Turma')
+        tree.column('id', width=50, anchor='w')
+        tree.column('nome', anchor='w')
+        tree.pack(side='left', fill='both', expand=True)
+        vsb = ttk.Scrollbar(list_container, orient='vertical', command=tree.yview)
+        tree.configure(yscrollcommand=vsb.set)
+        vsb.pack(side='right', fill='y')
+
+        def refresh_tree():
+            for i in tree.get_children():
+                tree.delete(i)
+            for t in listar_turmas(self.conn):
+                tree.insert('', 'end', values=(t.get('id'), t.get('nome')))
+
+        refresh_tree()
+
+        # Add new turma
+        ent_nova = ctk.CTkEntry(frame, placeholder_text='Nome da nova turma', width=320)
+        ent_nova.pack(pady=8)
+
+        def criar_nova():
+            nome = ent_nova.get().strip()
+            if not nome:
+                messagebox.showerror('Erro', 'Informe o nome da turma.')
+                return
+            try:
+                criar_turma(self.conn, nome)
+                messagebox.showinfo('Sucesso', 'Turma criada.')
+                ent_nova.delete(0, 'end')
+                refresh_tree()
+            except Exception as e:
+                messagebox.showerror('Erro', str(e))
+
+        ctk.CTkButton(frame, text='Criar Turma', width=160, command=criar_nova).pack(pady=6)
 
     def tela_consultar_aluno(self):
         win = ctk.CTkToplevel(self.menu_janela)
@@ -447,6 +556,7 @@ class SistemaGUI:
                     f"Matrícula: {aluno.get('matricula')}\n"
                     f"Nome: {aluno.get('nome')}\n"
                     f"Curso: {aluno.get('curso')}\n"
+                    f"Turma: {aluno.get('turma') or '-'}\n"
                     f"Data de Nascimento: {aluno.get('data_nascimento')}\n\n"
                     "- Notas -\n"
                     f"NP1: {np1}\n"
@@ -497,6 +607,7 @@ class SistemaGUI:
             f"Matrícula: {aluno.get('matricula')}\n"
             f"Nome: {aluno.get('nome')}\n"
             f"Curso: {aluno.get('curso')}\n"
+            f"Turma: {aluno.get('turma') or '-'}\n"
             f"Data de Nascimento: {aluno.get('data_nascimento')}\n\n"
             "- Notas -\n"
             f"NP1: {np1}\n"
@@ -634,7 +745,7 @@ class SistemaGUI:
 
         container = tk.Frame(frame)
         container.pack(fill='both', expand=True)
-        cols = ("matricula", "nome", "curso", "nasc", "np1", "np2")
+        cols = ("matricula", "nome", "curso", "turma", "nasc", "np1", "np2")
         tree = ttk.Treeview(container, columns=cols, show='headings')
         for c in cols:
             tree.heading(c, text=c.capitalize())
@@ -647,7 +758,7 @@ class SistemaGUI:
         for a in listar_alunos(self.conn):
             np1 = a.get('np1') if a.get('np1') is not None else '—'
             np2 = a.get('np2') if a.get('np2') is not None else '—'
-            tree.insert('', 'end', values=(a.get('matricula'), a.get('nome'), a.get('curso'), a.get('data_nascimento'), np1, np2))
+            tree.insert('', 'end', values=(a.get('matricula'), a.get('nome'), a.get('curso'), a.get('turma') or '-', a.get('data_nascimento'), np1, np2))
 
     def tela_menu_notas(self):
         win = ctk.CTkToplevel(self.menu_janela)
@@ -735,7 +846,8 @@ class SistemaGUI:
             texto = (
                 "- Dados do Aluno -\n"
                 f"Nome: {aluno.get('nome')}\n"
-                f"Curso: {aluno.get('curso')}\n\n"
+                f"Curso: {aluno.get('curso')}\n"
+                f"Turma: {aluno.get('turma') or '-'}\n\n"
                 "- Notas -\n"
                 f"NP1: {np1}\n"
                 f"NP2: {np2}\n"
@@ -788,15 +900,8 @@ class SistemaGUI:
             
     def abrir_chat(self):
         tipo_usuario = self.usuario_logado['tipo']
-        # Se a variável de ambiente SISTEMA_API_URL estiver definida, use a API em vez
-        # do acesso direto ao DB. Exemplo: http://192.168.0.10:5000
-        api_url = None
-        try:
-            api_url = os.environ.get('SISTEMA_API_URL')
-        except Exception:
-            api_url = None
-
-        chat = ChatApp(self.menu_janela, self.conn, self.usuario_logado, api_url=api_url)
+        # Chat opera sempre sobre o banco local; parâmetro api_url foi removido
+        chat = ChatApp(self.menu_janela, self.conn, self.usuario_logado)
         # Chat agora usa o usuário autenticado (persistente) — não há seletor de papel local
 
     def _is_float(self, v):

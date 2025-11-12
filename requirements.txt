@@ -1,9 +1,4 @@
 customtkinter
 fpdf2
 
-# API server
-Flask
-flask-cors
-requests
-waitress
-gunicorn
+# Nota: dependências de API removidas — este requirements.txt é para a execução local da GUI

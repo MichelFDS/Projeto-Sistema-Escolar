@@ -6,10 +6,6 @@ from tkinter import scrolledtext
 from src.database import salvar_mensagem, listar_mensagens
 import os
 import json
-try:
-    import requests
-except Exception:
-    requests = None
 
 
 class ChatApp:
@@ -23,12 +19,15 @@ class ChatApp:
     POLL_MS = 2000
 
     def __init__(self, parent, conn, usuario, api_url: str = None):
-        """Se api_url for fornecida (ex: http://192.168.0.10:5000), o chat usará a API
-        em vez do acesso direto ao banco (modo LAN/demo)."""
+        """Chat em modo local (acesso direto ao banco).
+        Parâmetro `api_url` é ignorado — mantido por compatibilidade de chamada.
+        """
         self.conn = conn
         self.usuario = usuario or {'username': 'anon', 'tipo': 'aluno'}
-        self.api_url = api_url or os.environ.get('SISTEMA_API_URL')
-        self.api_mode = bool(self.api_url) and requests is not None
+        # garantir compatibilidade com chamadas que podem passar api_url;
+        # o chat agora sempre usa acesso direto ao DB.
+        self.api_url = None
+        self.api_mode = False
 
         # janela
         self.window = ctk.CTkToplevel(parent)
@@ -103,11 +102,8 @@ class ChatApp:
         self.last_id = 0
         self.rendered_ids = set()
 
-        # carregar mensagens (via DB ou HTTP)
-        if self.api_mode:
-            self.load_messages_http()
-        else:
-            self.load_messages()
+        # carregar mensagens via DB
+        self.load_messages()
 
         # polling
         try:
@@ -253,23 +249,8 @@ class ChatApp:
         tipo = self.usuario.get('tipo')
         new_id = None
         try:
-            if self.api_mode:
-                # enviar via HTTP POST
-                payload = {'usuario': username, 'texto': message, 'tipo': tipo}
-                try:
-                    resp = requests.post(f"{self.api_url.rstrip('/')}/api/mensagens", json=payload, timeout=3)
-                    if resp.status_code in (200, 201):
-                        # não temos o id retornado; será atualizado pelo polling
-                        new_id = None
-                    else:
-                        print('Chat: envio HTTP retornou:', resp.status_code, resp.text)
-                except Exception as e:
-                    print('Chat: erro ao enviar via API:', e)
-                    # fallback local se possível
-                    new_id = salvar_mensagem(self.conn, username, tipo, message)
-            else:
-                # write to DB; salvar_mensagem should commit and return lastrowid
-                new_id = salvar_mensagem(self.conn, username, tipo, message)
+            # Sempre gravar diretamente no banco local
+            new_id = salvar_mensagem(self.conn, username, tipo, message)
         except Exception as e:
             # surface minor DB errors to console for debugging
             print("Chat: erro ao salvar mensagem:", e)
@@ -290,30 +271,5 @@ class ChatApp:
         self._scroll_to_bottom()
 
     # ---- HTTP helper methods (quando api_mode == True) ----
-    def _fetch_messages_http(self):
-        """Busca todas mensagens na API e retorna apenas as novas (com id > last_id)."""
-        if not self.api_mode:
-            return []
-        try:
-            resp = requests.get(f"{self.api_url.rstrip('/')}/api/mensagens", timeout=3)
-            if resp.status_code != 200:
-                print('Chat: erro HTTP ao listar mensagens:', resp.status_code)
-                return []
-            msgs = resp.json() or []
-            # Filtrar por last_id
-            new = [m for m in msgs if (m.get('id') or 0) > (self.last_id or 0)]
-            # Ordenar por id asc
-            new.sort(key=lambda x: x.get('id') or 0)
-            return new
-        except Exception as e:
-            print('Chat: exceção _fetch_messages_http:', e)
-            return []
-
-    def load_messages_http(self):
-        msgs = self._fetch_messages_http()
-        for m in msgs:
-            if m['id'] not in self.rendered_ids:
-                self._add_message_widget(m)
-                self.last_id = m['id']
-        self._scroll_to_bottom()
+    # Note: HTTP helpers removed — chat uses DB access only.
 
